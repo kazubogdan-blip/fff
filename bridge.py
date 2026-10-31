@@ -36,8 +36,12 @@ async def messages(request: Request):
     if is_stream:
         async def event_generator():
             async with client.stream("POST", LLAMA_URL, json=openai_payload) as response:
-                yield f"event: message_start\ndata: {json.dumps({'type': 'message_start', 'message': {'id': 'msg_1', 'type': 'message', 'role': 'assistant', 'content': [], 'model': 'claude-3-5-sonnet-20241022', 'stop_reason': None, 'stop_sequence': None, 'usage': {'input_tokens': 10, 'output_tokens': 1}}})}\n\n"
-                yield f"event: content_block_start\ndata: {json.dumps({'type': 'content_block_start', 'index': 0, 'content_block': {'type': 'text', 'text': ''}})}\n\n"
+                d_start = json.dumps({'type': 'message_start', 'message': {'id': 'msg_1', 'type': 'message', 'role': 'assistant', 'content': [], 'model': 'claude-3-5-sonnet-20241022', 'stop_reason': None, 'stop_sequence': None, 'usage': {'input_tokens': 10, 'output_tokens': 1}}})
+                yield f"event: message_start\ndata: {d_start}\n\n"
+                
+                d_block = json.dumps({'type': 'content_block_start', 'index': 0, 'content_block': {'type': 'text', 'text': ''}})
+                yield f"event: content_block_start\ndata: {d_block}\n\n"
+                
                 async for line in response.aiter_lines():
                     if line.startswith("data: "):
                         data_str = line[6:].strip()
@@ -47,12 +51,20 @@ async def messages(request: Request):
                             chunk = json.loads(data_str)
                             delta = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
                             if delta:
-                                yield f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'text_delta', 'text': delta}})}\n\n"
+                                d_delta = json.dumps({'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'text_delta', 'text': delta}})
+                                yield f"event: content_block_delta\ndata: {d_delta}\n\n"
                         except Exception:
                             pass
-                yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': 0})}\n\n"
-                yield f"event: message_delta\ndata: {json.dumps({'type': 'message_delta', 'delta': {'stop_reason': 'end_turn', 'stop_sequence': None}, 'usage': {'output_tokens': 15}}})}\n\n"
-                yield f"event: message_stop\ndata: {json.dumps({'type': 'message_stop'})}\n\n"
+                            
+                d_stop = json.dumps({'type': 'content_block_stop', 'index': 0})
+                yield f"event: content_block_stop\ndata: {d_stop}\n\n"
+                
+                d_msg_delta = json.dumps({'type': 'message_delta', 'delta': {'stop_reason': 'end_turn', 'stop_sequence': None}, 'usage': {'output_tokens': 15}})
+                yield f"event: message_delta\ndata: {d_msg_delta}\n\n"
+                
+                d_msg_stop = json.dumps({'type': 'message_stop'})
+                yield f"event: message_stop\ndata: {d_msg_stop}\n\n"
+                
         return StreamingResponse(event_generator(), media_type="text/event-stream")
     else:
         async with client as c:
