@@ -5,6 +5,13 @@ import httpx
 app = FastAPI()
 LLAMA_URL = "http://localhost:8080/v1/chat/completions"
 
+@app.get("/v1/models")
+async def list_models():
+    return {
+        "object": "list",
+        "data": [{"id": "claude-3-5-sonnet-20241022", "object": "model"}]
+    }
+
 def convert_tools(anthropic_tools):
     if not anthropic_tools:
         return None
