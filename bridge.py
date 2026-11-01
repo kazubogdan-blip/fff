@@ -1,87 +1,155 @@
+cat << 'EOF' > bridge.py
 import json
 from fastapi import FastAPI, Request
-from fastapi.responses import StreamingResponse
 import httpx
 
 app = FastAPI()
 LLAMA_URL = "http://localhost:8080/v1/chat/completions"
 
+def convert_tools(anthropic_tools):
+    if not anthropic_tools:
+        return None
+    openai_tools = []
+    for t in anthropic_tools:
+        openai_tools.append({
+            "type": "function",
+            "function": {
+                "name": t.get("name"),
+                "description": t.get("description", ""),
+                "parameters": t.get("input_schema", {"type": "object", "properties": {}})
+            }
+        })
+    return openai_tools
+
+def convert_messages(anthropic_messages):
+    openai_messages = []
+    for m in anthropic_messages:
+        role = m.get("role")
+        content = m.get("content")
+        
+        if role == "user":
+            if isinstance(content, str):
+                openai_messages.append({"role": "user", "content": content})
+            elif isinstance(content, list):
+                text_parts = []
+                for block in content:
+                    if isinstance(block, dict):
+                        b_type = block.get("type")
+                        if b_type == "text":
+                            text_parts.append(block.get("text", ""))
+                        elif b_type == "tool_result":
+                            tool_result_content = block.get("content", "")
+                            if isinstance(tool_result_content, list):
+                                tool_result_content = "".join([c.get("text", "") for c in tool_result_content if isinstance(c, dict)])
+                            # OpenAI așteaptă rolul "tool" pentru rezultatele uneltelor
+                            openai_messages.append({
+                                "role": "tool",
+                                "tool_call_id": block.get("tool_use_id"),
+                                "content": str(tool_result_content)
+                            })
+                if text_parts:
+                    openai_messages.append({"role": "user", "content": "\n".join(text_parts)})
+                    
+        elif role == "assistant":
+            if isinstance(content, str):
+                openai_messages.append({"role": "assistant", "content": content})
+            elif isinstance(content, list):
+                text_parts = []
+                tool_calls = []
+                for block in content:
+                    if isinstance(block, dict):
+                        b_type = block.get("type")
+                        if b_type == "text":
+                            text_parts.append(block.get("text", ""))
+                        elif b_type == "tool_use":
+                            tool_calls.append({
+                                "id": block.get("id", "call_1"),
+                                "type": "function",
+                                "function": {
+                                    "name": block.get("name"),
+                                    "arguments": json.dumps(block.get("input", {}))
+                                }
+                            })
+                msg_obj = {"role": "assistant"}
+                msg_obj["content"] = "\n".join(text_parts) if text_parts else None
+                if tool_calls:
+                    msg_obj["tool_calls"] = tool_calls
+                openai_messages.append(msg_obj)
+    return openai_messages
+
 @app.post("/v1/messages")
 async def messages(request: Request):
     body = await request.json()
     messages = []
+    
     if "system" in body:
         sys = body["system"]
         if isinstance(sys, list):
             sys = "\n".join([s.get("text", "") for s in sys])
         if sys:
             messages.append({"role": "system", "content": sys})
-    for m in body.get("messages", []):
-        role = m.get("role")
-        content = m.get("content")
-        if isinstance(content, list):
-            content = "".join([c.get("text", "") for c in content if isinstance(c, dict) and c.get("type") == "text"])
-        elif not isinstance(content, str):
-            content = str(content)
-        messages.append({"role": role, "content": content})
-    is_stream = body.get("stream", False)
+            
+    messages.extend(convert_messages(body.get("messages", [])))
+    
     openai_payload = {
-        "model": "qwen-27b",
+        "model": "qwen",
         "messages": messages,
-        "max_tokens": body.get("max_tokens", 4096),
+        "max_tokens": min(body.get("max_tokens", 8192), 8192),
         "temperature": body.get("temperature", 0.7),
-        "stream": is_stream
+        "stream": False
     }
-    client = httpx.AsyncClient(timeout=120.0)
-    if is_stream:
-        async def event_generator():
-            async with client.stream("POST", LLAMA_URL, json=openai_payload) as response:
-                d_start = json.dumps({'type': 'message_start', 'message': {'id': 'msg_1', 'type': 'message', 'role': 'assistant', 'content': [], 'model': 'claude-3-5-sonnet-20241022', 'stop_reason': None, 'stop_sequence': None, 'usage': {'input_tokens': 10, 'output_tokens': 1}}})
-                yield f"event: message_start\ndata: {d_start}\n\n"
+    
+    tools = convert_tools(body.get("tools"))
+    if tools:
+        openai_payload["tools"] = tools
+
+    async with httpx.AsyncClient(timeout=300.0) as client:
+        resp = await client.post(LLAMA_URL, json=openai_payload)
+        data = resp.json()
+        
+        choice = data.get("choices", [{}])[0]
+        message = choice.get("message", {})
+        content = message.get("content") or ""
+        tool_calls = message.get("tool_calls")
+        
+        response_content = []
+        stop_reason = "end_turn"
+        
+        if content:
+            response_content.append({"type": "text", "text": content})
+            
+        if tool_calls:
+            stop_reason = "tool_use"
+            for tc in tool_calls:
+                func = tc.get("function", {})
+                args_str = func.get("arguments", "{}")
+                try:
+                    args_dict = json.loads(args_str)
+                except Exception:
+                    args_dict = {}
+                    
+                response_content.append({
+                    "type": "tool_use",
+                    "id": tc.get("id", "call_1"),
+                    "name": func.get("name"),
+                    "input": args_dict
+                })
                 
-                d_block = json.dumps({'type': 'content_block_start', 'index': 0, 'content_block': {'type': 'text', 'text': ''}})
-                yield f"event: content_block_start\ndata: {d_block}\n\n"
-                
-                async for line in response.aiter_lines():
-                    if line.startswith("data: "):
-                        data_str = line[6:].strip()
-                        if data_str == "[DONE]":
-                            break
-                        try:
-                            chunk = json.loads(data_str)
-                            delta = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
-                            if delta:
-                                d_delta = json.dumps({'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'text_delta', 'text': delta}})
-                                yield f"event: content_block_delta\ndata: {d_delta}\n\n"
-                        except Exception:
-                            pass
-                            
-                d_stop = json.dumps({'type': 'content_block_stop', 'index': 0})
-                yield f"event: content_block_stop\ndata: {d_stop}\n\n"
-                
-                d_msg_delta = json.dumps({'type': 'message_delta', 'delta': {'stop_reason': 'end_turn', 'stop_sequence': None}, 'usage': {'output_tokens': 15}})
-                yield f"event: message_delta\ndata: {d_msg_delta}\n\n"
-                
-                d_msg_stop = json.dumps({'type': 'message_stop'})
-                yield f"event: message_stop\ndata: {d_msg_stop}\n\n"
-                
-        return StreamingResponse(event_generator(), media_type="text/event-stream")
-    else:
-        async with client as c:
-            resp = await c.post(LLAMA_URL, json=openai_payload)
-            data = resp.json()
-            content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-            return {
-                "id": "msg_1",
-                "type": "message",
-                "role": "assistant",
-                "content": [{"type": "text", "text": content}],
-                "model": "claude-3-5-sonnet-20241022",
-                "stop_reason": "end_turn",
-                "stop_sequence": None,
-                "usage": {"input_tokens": 10, "output_tokens": 20}
-            }
+        if not response_content:
+            response_content.append({"type": "text", "text": "Done."})
+
+        return {
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "content": response_content,
+            "model": "claude-3-5-sonnet-20241022",
+            "stop_reason": stop_reason,
+            "stop_sequence": None,
+            "usage": {"input_tokens": 10, "output_tokens": 20}
+        }
 
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=11434)
+EOF
