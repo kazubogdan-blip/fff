@@ -1,4 +1,3 @@
-cat << 'EOF' > bridge.py
 import json
 from fastapi import FastAPI, Request
 import httpx
@@ -152,4 +151,3 @@ async def messages(request: Request):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=11434)
-EOF
