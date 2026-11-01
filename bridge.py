@@ -47,7 +47,6 @@ def convert_messages(anthropic_messages):
                             tool_result_content = block.get("content", "")
                             if isinstance(tool_result_content, list):
                                 tool_result_content = "".join([c.get("text", "") for c in tool_result_content if isinstance(c, dict)])
-                            # OpenAI așteaptă rolul "tool" pentru rezultatele uneltelor
                             openai_messages.append({
                                 "role": "tool",
                                 "tool_call_id": block.get("tool_use_id"),
@@ -113,6 +112,8 @@ async def messages(request: Request):
         resp = await client.post(LLAMA_URL, json=openai_payload)
         data = resp.json()
         
+        print("DEBUG LLAMA RESP:", json.dumps(data, ensure_ascii=False))
+        
         choice = data.get("choices", [{}])[0]
         message = choice.get("message", {})
         content = message.get("content") or ""
@@ -142,7 +143,7 @@ async def messages(request: Request):
                 })
                 
         if not response_content:
-            response_content.append({"type": "text", "text": "Done."})
+            response_content.append({"type": "text", "text": f"Eroare: Răspuns gol de la llama.cpp. Mesaj primit: {message}"})
 
         return {
             "id": "msg_1",
